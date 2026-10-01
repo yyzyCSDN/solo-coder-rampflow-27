@@ -71,9 +71,12 @@ class ConnectionManager:
         self.connections[key] = connection
 
     def effective_minimum(self, connection: Connection) -> int:
+        # The terminal change and special-assistance allowances are sequential
+        # activities: a wheelchair passenger changing terminals needs both the
+        # transfer time and the assistance time (same as rebooking_options
+        # below), never just the larger of the two.
         transfer = 0 if connection.same_terminal else self.terminal_change_min
-        supplemental = max(connection.assistance_min, transfer)
-        return connection.minimum_connect_min + supplemental
+        return connection.minimum_connect_min + transfer + connection.assistance_min
 
     def margin_minutes(self, connection: Connection) -> int:
         inbound = self.flight_arrivals.get(
