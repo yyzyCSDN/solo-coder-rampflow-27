@@ -26,12 +26,36 @@ class Scan:
     def __post_init__(self):object.__setattr__(self,'occurred_at',utc(self.occurred_at))
 
 class BagReconciler:
+    transitions={
+        BagState.ACCEPTED:{'screen':BagState.SCREENED,'transfer':BagState.TRANSFER,'missing':BagState.MISSING},
+        BagState.SCREENED:{'sort':BagState.SORTED,'missing':BagState.MISSING},
+        BagState.SORTED:{'load':BagState.LOADED,'missing':BagState.MISSING},
+        BagState.LOADED:{'offload':BagState.OFFLOADED,'missing':BagState.MISSING},
+        BagState.OFFLOADED:{'sort':BagState.SORTED,'transfer':BagState.TRANSFER},
+        BagState.TRANSFER:{'screen':BagState.SCREENED,'sort':BagState.SORTED,'missing':BagState.MISSING},
+        BagState.MISSING:{'screen':BagState.SCREENED,'sort':BagState.SORTED,'load':BagState.LOADED},
+    }
+
     def __init__(self,max_late_scan_minutes:int=30):
-        self.max_late=timedelta(minutes=max_late_scan_minutes);self.bags:dict[str,Bag]={};self._seen_scans:set[str]=set();self._history:dict[str,list[Scan]]={}
+        self.max_late=timedelta(minutes=max_late_scan_minutes);self.bags:dict[str,Bag]={};self._seen_scans:set[str]=set();self._history:dict[str,list[Scan]]={};self._registered:dict[str,Bag]={}
 
     def register(self,bag:Bag)->None:
         if bag.tag in self.bags:raise ValueError('duplicate bag')
-        self.bags[bag.tag]=bag;self._history[bag.tag]=[]
+        self.bags[bag.tag]=bag;self._history[bag.tag]=[];self._registered[bag.tag]=bag
+
+    def _replay(self,tag:str,scans:list[Scan])->Bag:
+        bag=self._registered[tag]
+        state=bag.state;last_seen=bag.last_seen_at;location=bag.location;flight_id=bag.flight_id;container_id=bag.container_id
+        for scan in scans:
+            nxt=self.transitions.get(state,{}).get(scan.action)
+            if nxt is None:
+                raise RuntimeError(f"invalid bag transition {state}:{scan.action}")
+            state=nxt
+            last_seen=max(last_seen,scan.occurred_at)
+            location=scan.location
+            flight_id=scan.flight_id or flight_id
+            container_id=scan.container_id if scan.container_id is not None else container_id
+        return replace(bag,state=state,last_seen_at=last_seen,location=location,flight_id=flight_id,container_id=container_id,sequence=bag.sequence+len(scans))
 
     def ingest(self, scan: Scan) -> Bag:
         if scan.scan_id in self._seen_scans:
@@ -39,19 +63,8 @@ class BagReconciler:
         bag = self.bags[scan.tag]
         if scan.occurred_at < bag.last_seen_at - self.max_late:
             raise RuntimeError("scan outside late-arrival tolerance")
-        allowed = {
-            BagState.ACCEPTED:{'screen':BagState.SCREENED,'transfer':BagState.TRANSFER,'missing':BagState.MISSING},
-            BagState.SCREENED:{'sort':BagState.SORTED,'missing':BagState.MISSING},
-            BagState.SORTED:{'load':BagState.LOADED,'missing':BagState.MISSING},
-            BagState.LOADED:{'offload':BagState.OFFLOADED,'missing':BagState.MISSING},
-            BagState.OFFLOADED:{'sort':BagState.SORTED,'transfer':BagState.TRANSFER},
-            BagState.TRANSFER:{'screen':BagState.SCREENED,'sort':BagState.SORTED,'missing':BagState.MISSING},
-            BagState.MISSING:{'screen':BagState.SCREENED,'sort':BagState.SORTED,'load':BagState.LOADED},
-        }
-        nxt = allowed.get(bag.state, {}).get(scan.action)
-        if nxt is None:
-            raise RuntimeError(f"invalid bag transition {bag.state}:{scan.action}")
-        updated = replace(bag, state=nxt, last_seen_at=max(bag.last_seen_at, scan.occurred_at), location=scan.location, flight_id=scan.flight_id or bag.flight_id, container_id=scan.container_id if scan.container_id is not None else bag.container_id, sequence=bag.sequence+1)
+        ordered=sorted(self._history[scan.tag]+[scan],key=lambda s:s.occurred_at)
+        updated=self._replay(scan.tag,ordered)
         self._history[scan.tag].append(scan)
         self._seen_scans.add(scan.scan_id)
         self.bags[scan.tag] = updated

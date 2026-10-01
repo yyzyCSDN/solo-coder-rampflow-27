@@ -72,8 +72,7 @@ class ConnectionManager:
 
     def effective_minimum(self, connection: Connection) -> int:
         transfer = 0 if connection.same_terminal else self.terminal_change_min
-        supplemental = max(connection.assistance_min, transfer)
-        return connection.minimum_connect_min + supplemental
+        return connection.minimum_connect_min + transfer + connection.assistance_min
 
     def margin_minutes(self, connection: Connection) -> int:
         inbound = self.flight_arrivals.get(
